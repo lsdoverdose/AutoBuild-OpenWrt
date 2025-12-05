@@ -83,6 +83,7 @@ jobs:
           unzip \
           wget \
           xxd \
+          ca-certificates \
           zlib1g-dev
         
         # 可选：根据OpenWrt版本可能需要的额外包
