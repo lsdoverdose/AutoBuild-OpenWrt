@@ -1,7 +1,6 @@
 name: Build Custom Firmware
 
 on:
-  repository_dispatch:
   workflow_dispatch:
     inputs:
       config_filename:
