@@ -78,7 +78,11 @@ jobs:
           intltool \
           patchutils \
           scons \
-          texinfo
+          texinfo \
+          diffutils \
+          argp-standalone-dev \
+          musl-fts-dev \
+          musl-obstack-dev \
 
     - name: Clone source code
       env: 
