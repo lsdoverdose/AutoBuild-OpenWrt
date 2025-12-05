@@ -1,4 +1,4 @@
-name: Build_Custom
+name: Build Custom Firmware
 
 on:
   repository_dispatch:

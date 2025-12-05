@@ -7,10 +7,10 @@ on:
         type: choice
         description: '清理的工作流名称'
         required: true
-        default: 'Build_Custom'
+        default: 'Build Custom Firmware'
         options:
-          - Build_Custom
-          - Build_x86-64
+          - Build Custom Firmware
+          - Build x86-64
       cache_mode:
         type: choice
         description: '缓存清理类型'
