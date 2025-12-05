@@ -1,11 +1,6 @@
-#=================================================
-# Description: Build OpenWrt using GitHub Actions
-# Lisence: MIT 
-#=================================================
-
 name: Build_Custom
 
-on: 
+on:
   repository_dispatch:
   workflow_dispatch:
     inputs:
@@ -18,8 +13,9 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # 已修改为使用Ubuntu容器
     container:
-      image: alpine:edge
+      image: ubuntu:latest
       options: --privileged
 
     steps:
@@ -28,70 +24,80 @@ jobs:
 
     - name: Clean workspace
       run: |
-        rm -rf /var/cache/apk/*
+        rm -rf /var/cache/apt/*
         rm -rf /tmp/*
         echo "Workspace cleaned"
 
-    - name: Install essential build tools 
+    - name: Update system and remove Snap completely
       run: |
-        apk update
-        apk add --no-cache \
-          bash \
-          git \
-          curl \
-          wget \
-          xz \
-          tar \
-          gzip \
-          bzip2 \
-          zip \
-          unzip \
-          coreutils \
-          findutils \
-          grep \
-          sed \
-          gawk \
-          make \
-          gcc \
-          g++ \
-          binutils \
-          cmake \
-          ninja \
-          patch \
-          pkgconf \
-          perl \
-          python3 \
-          py3-pip \
-          rsync \
-          ccache \
-          gettext-dev \
-          ncurses-dev \
-          openssl-dev \
-          zlib-dev \
-          libtool \
-          autoconf \
-          automake \
-          bison \
-          flex \
-          gawk \
-          help2man \
-          intltool \
-          patchutils \
-          scons \
-          texinfo \
-          diffutils \
-          argp-standalone-dev \
-          musl-fts-dev \
-          musl-obstack-dev \
+        # 1. 更新系统并禁用Snap服务[citation:2]
+        apt-get update
+        systemctl stop snapd.socket snapd.service snapd.seeded.service 2>/dev/null || true
+        systemctl disable snapd.socket snapd.service snapd.seeded.service 2>/dev/null || true
+        
+        # 2. 列出并移除所有已安装的Snap包[citation:2]
+        if command -v snap &> /dev/null; then
+            snap list | awk 'NR>1 {print $1}' | while read -r snap_package; do
+                case "$snap_package" in
+                    "snapd"|"core"|"core20"|"core22"|"bare") continue ;;
+                    *) snap remove --purge "$snap_package" 2>/dev/null || true ;;
+                esac
+            done
+            # 移除核心Snap组件
+            snap remove --purge snapd 2>/dev/null || true
+            snap remove --purge core20 2>/dev/null || true
+            snap remove --purge core22 2>/dev/null || true
+            snap remove --purge bare 2>/dev/null || true
+        fi
+        
+        # 3. 使用APT彻底移除snapd及相关目录[citation:2]
+        apt-get autoremove --purge -y snapd gnome-software-plugin-snap
+        rm -rf /var/cache/snapd
+        rm -rf ~/snap /snap
+        
+        # 4. 创建配置文件阻止Snap重新安装[citation:2]
+        mkdir -p /etc/apt/preferences.d/
+        echo 'Package: snapd
+Pin: release a=*
+Pin-Priority: -10' > /etc/apt/preferences.d/no-snap.pref
+
+        echo "Snap completely removed."
+
+    - name: System cleanup and space optimization
+      run: |
+        # 清理APT缓存和不必要的包[citation:3]
+        apt-get clean
+        apt-get autoclean
+        apt-get autoremove --purge -y
+        
+        # 删除不必要的文档、语言包和旧内核文件
+        rm -rf /usr/share/doc/*
+        rm -rf /usr/share/man/*
+        find /var/log -type f -name "*.log" -exec truncate -s 0 {} \;
+        
+        # 检查并报告可用空间
+        df -h /
+
+    - name: Install essential build tools for OpenWrt
+      run: |
+        # 更新包列表
+        apt-get update
+        
+        # 安装OpenWrt编译所需的核心依赖包[citation:1][citation:9]
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends build-essential autoconf automake autopoint binutils bison bzip2 ccache cmake cpio curl device-tree-compiler flex gawk gettext gcc-multilib g++-multilib git gperf libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev libreadline-dev libssl-dev libtool lrzsz patch pkgconf python3 python3-pyelftools python3-setuptools rsync squashfs-tools subversion swig texinfo unzip wget xmlto xxd zlib1g-dev 
+
+        # 清理安装过程中产生的缓存[citation:3]
+        apt-get clean
+        rm -rf /var/lib/apt/lists/*
 
     - name: Clone source code
-      env: 
+      env:
         REPO_URL: https://github.com/openwrt/openwrt
         REPO_BRANCH: openwrt-24.10
       run: |
         git clone --depth 1 $REPO_URL -b $REPO_BRANCH openwrt
         cd openwrt
-        
+
     - name: Update & Install feeds
       working-directory: ./openwrt
       run: |
@@ -110,7 +116,6 @@ jobs:
           echo "Warning: Configuration file $CONFIG_FILE not found!"
           echo "Using default configuration..."
         fi
-       
         
         cd openwrt && make defconfig
         
@@ -118,14 +123,26 @@ jobs:
       working-directory: ./openwrt
       run: |
         make download -j$(( $(nproc) + 1 ))
-        # Remove incomplete downloads
+        # 移除不完整的下载文件以节省空间
         find dl -size -1024c -delete 2>/dev/null || true
 
     - name: Build firmware
       working-directory: ./openwrt
       run: |
         echo "Building with $(nproc) threads"
+        # 使用CCache加速编译
+        export CCACHE_DIR="$(pwd)/.ccache"
+        ccache -M 5G
+        ccache -s
         make -j$(( $(nproc) + 1 )) V=s
+
+    - name: Final cleanup and space report
+      run: |
+        # 最终清理编译缓存
+        rm -rf /tmp/*
+        # 报告最终磁盘使用情况
+        echo "=== Final Disk Space Usage ==="
+        df -h /
 
     - name: Upload artifact
       uses: actions/upload-artifact@v4
