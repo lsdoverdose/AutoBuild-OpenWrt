@@ -1,13 +1,10 @@
 #=================================================
 # Description: Build OpenWrt using GitHub Actions
-# Lisence: MIT
-# Author: eSirPlayground
-# Youtube Channel: https://goo.gl/fvkdwm 
+# Lisence: MIT 
 #=================================================
 
 name: Build_Custom
 
-# Add a button to trigger the workflow
 on: 
   repository_dispatch:
   workflow_dispatch:
@@ -15,64 +12,89 @@ on:
       config_filename:
         description: 'Configuration file name in repository (e.g., x86_64.config)'
         required: true
-        default: 'x86_64.config'
+        default: 'cc.config'
         type: string
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    container:
+      image: alpine:edge
+      options: --privileged
 
     steps:
     - name: Checkout
-      uses: actions/checkout@master
+      uses: actions/checkout@v4
 
-    - name: Initialization environment
-      env:
-        DEBIAN_FRONTEND: noninteractive
+    - name: Clean workspace
       run: |
-        set +e
-        docker rmi `docker images -q`
-        echo "Deleting files, please wait ..."
-        sudo rm -rf \
-          /usr/share/dotnet \
-          /usr/local/lib/android \
-          /opt/ghc \
-          /etc/mysql \
-          /etc/php
-        sudo -E apt-get -y purge azure-cli* docker* ghc* zulu* hhvm* llvm* firefox* google* dotnet* aspnetcore* powershell* openjdk* adoptopenjdk* mysql* php* mongodb* moby* snap* || true
-        sudo -E apt-get update
-        sudo -E apt-get -y install ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential bzip2 ccache cmake cpio curl device-tree-compiler fastjar flex gawk gettext gcc-multilib g++-multilib git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev libreadline-dev libssl-dev libtool lrzsz mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf python2.7 python3 python3-pyelftools python3-setuptools qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev qemu-img
-        sudo -E apt-get -y autoremove --purge
-        sudo -E apt-get clean
+        rm -rf /var/cache/apk/*
+        rm -rf /tmp/*
+        echo "Workspace cleaned"
+
+    - name: Install essential build tools 
+      run: |
+        apk update
+        apk add --no-cache \
+          bash \
+          git \
+          curl \
+          wget \
+          xz \
+          tar \
+          gzip \
+          bzip2 \
+          zip \
+          unzip \
+          coreutils \
+          findutils \
+          grep \
+          sed \
+          awk \
+          make \
+          gcc \
+          g++ \
+          binutils \
+          cmake \
+          ninja \
+          patch \
+          pkgconf \
+          perl \
+          python3 \
+          py3-pip \
+          rsync \
+          ccache \
+          gettext-dev \
+          ncurses-dev \
+          openssl-dev \
+          zlib-dev \
+          libtool \
+          autoconf \
+          automake \
+          bison \
+          flex \
+          gawk \
+          help2man \
+          intltool \
+          patchutils \
+          scons \
+          texinfo
 
     - name: Clone source code
       env: 
-        REPO_URL: https://github.com/coolsnowwolf/lede
-        REPO_BRANCH: master
+        REPO_URL: https://github.com/openwrt/openwrt
+        REPO_BRANCH: openwrt-24.10
       run: |
         git clone --depth 1 $REPO_URL -b $REPO_BRANCH openwrt
         cd openwrt
-        echo "src-git ssrp https://github.com/fw876/helloworld.git" >> ./feeds.conf.default
         
     - name: Update & Install feeds
       working-directory: ./openwrt
       run: |
         ./scripts/feeds update -a
         ./scripts/feeds install -a
-        ./scripts/feeds install -a
 
-    #- name: Import external feeds - passwall
-    #  working-directory: ./openwrt
-    #  run: |
-    #    git clone https://github.com/xiaorouji/openwrt-passwall.git package/lienol
-    #    git clone "your_github_link" package/"your_folder_name"      
-
-    #- name: Import external feeds - JerryKuKu Argon
-    #  working-directory: ./openwrt
-    #  run: |
-    #    git clone -b 18.06 https://github.com/jerrykuku/luci-theme-argon.git package/luci-theme-argon-jerrykuku
-
-    - name: Configuration Customization - Build_x86_64
+    - name: Configuration Customization
       env:
         CONFIG_FILE: '${{ github.event.inputs.config_filename }}'
       run: |
@@ -84,24 +106,25 @@ jobs:
           echo "Warning: Configuration file $CONFIG_FILE not found!"
           echo "Using default configuration..."
         fi
-        chmod +x ./customize.sh && ./customize.sh
+       
+        
         cd openwrt && make defconfig
         
-    - name: Download package
+    - name: Download packages
       working-directory: ./openwrt
       run: |
         make download -j$(nproc)
-        find dl -size -1024c -exec ls -l {} \;
-        find dl -size -1024c -exec rm -f {} \;
+        # Remove incomplete downloads
+        find dl -size -1024c -delete 2>/dev/null || true
 
     - name: Build firmware
       working-directory: ./openwrt
       run: |
-        echo -e "$(nproc) thread build."
+        echo "Building with $(nproc) threads"
         make -j$(nproc) V=s
 
-    - name : Upload artifact
-      uses: actions/upload-artifact@master
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
       with:
         name: OpenWrt_${{ github.event.inputs.config_filename }}_${{ github.run_id }}
         path: openwrt/bin
