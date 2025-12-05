@@ -12,139 +12,215 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    # 已修改为使用Ubuntu容器
+    
+    # 使用更小的基础镜像节省空间
     container:
-      image: ubuntu:latest
-      options: --privileged
+      image: ubuntu:22.04
+      options: >-
+        --cap-add=SYS_ADMIN
+        --device=/dev/fuse
+        --tmpfs /tmp:exec,mode=1777
+        --tmpfs /run:exec,mode=1777
 
     steps:
     - name: Checkout
       uses: actions/checkout@v4
 
-    - name: Clean workspace
-      run: |
-        rm -rf /var/cache/apt/*
-        rm -rf /tmp/*
-        echo "Workspace cleaned"
+    - name: Initial space check
+      run: df -h /
 
-    - name: Update system and remove Snap completely
+    - name: Remove unnecessary packages and cleanup
       run: |
-        # 1. 更新系统并禁用Snap服务[citation:2]
-        apt-get update
-        systemctl stop snapd.socket snapd.service snapd.seeded.service 2>/dev/null || true
-        systemctl disable snapd.socket snapd.service snapd.seeded.service 2>/dev/null || true
-        
-        # 2. 列出并移除所有已安装的Snap包[citation:2]
+        # 检查并移除可能存在的snap（虽然容器中通常没有）
         if command -v snap &> /dev/null; then
-            snap list | awk 'NR>1 {print $1}' | while read -r snap_package; do
-                case "$snap_package" in
-                    "snapd"|"core"|"core20"|"core22"|"bare") continue ;;
-                    *) snap remove --purge "$snap_package" 2>/dev/null || true ;;
-                esac
-            done
-            # 移除核心Snap组件
-            snap remove --purge snapd 2>/dev/null || true
-            snap remove --purge core20 2>/dev/null || true
-            snap remove --purge core22 2>/dev/null || true
-            snap remove --purge bare 2>/dev/null || true
+          echo "Snap found, removing..."
+          snap list 2>/dev/null || true
+          apt-get update
+          apt-get remove --purge -y snapd
+          rm -rf ~/snap /snap /var/snap /var/lib/snapd
+        else
+          echo "Snap not installed, skipping removal"
         fi
         
-        # 3. 使用APT彻底移除snapd及相关目录[citation:2]
-        apt-get autoremove --purge -y snapd gnome-software-plugin-snap
-        rm -rf /var/cache/snapd
-        rm -rf ~/snap /snap
-        
-        # 4. 创建配置文件阻止Snap重新安装[citation:2]
-        mkdir -p /etc/apt/preferences.d/
-        echo 'Package: snapd
-Pin: release a=*
-Pin-Priority: -10' > /etc/apt/preferences.d/no-snap.pref
-
-        echo "Snap completely removed."
-
-    - name: System cleanup and space optimization
-      run: |
-        # 清理APT缓存和不必要的包[citation:3]
+        # 清理apt缓存和临时文件
         apt-get clean
-        apt-get autoclean
-        apt-get autoremove --purge -y
+        rm -rf /var/lib/apt/lists/*
+        rm -rf /tmp/*
         
-        # 删除不必要的文档、语言包和旧内核文件
-        rm -rf /usr/share/doc/*
-        rm -rf /usr/share/man/*
-        find /var/log -type f -name "*.log" -exec truncate -s 0 {} \;
+        # 删除不必要的文档和语言文件
+        find /usr/share/doc -depth -type f ! -name copyright -delete 2>/dev/null || true
+        find /usr/share/man -type f -delete 2>/dev/null || true
         
-        # 检查并报告可用空间
+        echo "=== After cleanup ==="
         df -h /
 
-    - name: Install essential build tools for OpenWrt
+    - name: Install build dependencies
       run: |
         # 更新包列表
         apt-get update
         
-        # 安装OpenWrt编译所需的核心依赖包[citation:1][citation:9]
-        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends build-essential autoconf automake autopoint binutils bison bzip2 ccache cmake cpio curl device-tree-compiler flex gawk gettext gcc-multilib g++-multilib git gperf libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev libreadline-dev libssl-dev libtool lrzsz patch pkgconf python3 python3-pyelftools python3-setuptools rsync squashfs-tools subversion swig texinfo unzip wget xmlto xxd zlib1g-dev 
-
-        # 清理安装过程中产生的缓存[citation:3]
+        # 安装编译所需的最小化依赖
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+          build-essential \
+          ccache \
+          cpio \
+          curl \
+          file \
+          gawk \
+          gcc-multilib \
+          g++-multilib \
+          gettext \
+          git \
+          libncurses5-dev \
+          libncursesw5-dev \
+          libssl-dev \
+          make \
+          python3 \
+          python3-pyelftools \
+          python3-setuptools \
+          rsync \
+          subversion \
+          unzip \
+          wget \
+          xxd \
+          zlib1g-dev
+        
+        # 可选：根据OpenWrt版本可能需要的额外包
+        apt-get install -y --no-install-recommends \
+          binutils \
+          bzip2 \
+          flex \
+          gperf \
+          libelf-dev \
+          libtool \
+          patch \
+          pkg-config \
+          time \
+        
+        # 清理安装缓存
         apt-get clean
-        rm -rf /var/lib/apt/lists/*
+        rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+        
+        echo "=== After installing dependencies ==="
+        df -h /
 
-    - name: Clone source code
-      env:
-        REPO_URL: https://github.com/openwrt/openwrt
-        REPO_BRANCH: openwrt-24.10
+    - name: Clone OpenWrt source
       run: |
-        git clone --depth 1 $REPO_URL -b $REPO_BRANCH openwrt
-        cd openwrt
+        # 浅克隆节省空间和时间
+        git clone --depth 1 --branch openwrt-24.10 \
+          https://github.com/openwrt/openwrt.git openwrt
+        
+        # 设置ccache
+        mkdir -p /ccache
+        echo "CCACHE_DIR=/ccache" >> $GITHUB_ENV
+        echo "/ccache *(rw,sync,no_subtree_check,no_root_squash)" > /etc/exports
 
-    - name: Update & Install feeds
+    - name: Setup ccache
+      run: |
+        ccache -M 4G  # 根据可用空间调整
+        ccache -s
+
+    - name: Update and install feeds
       working-directory: ./openwrt
       run: |
         ./scripts/feeds update -a
         ./scripts/feeds install -a
 
-    - name: Configuration Customization
+    - name: Apply configuration
       env:
-        CONFIG_FILE: '${{ github.event.inputs.config_filename }}'
+        CONFIG_FILE: ${{ github.event.inputs.config_filename }}
       run: |
-        echo "Using configuration file: $CONFIG_FILE"
-        if [ -e "$CONFIG_FILE" ]; then
-          echo "Configuration file found, applying..."
-          cp "$CONFIG_FILE" openwrt/.config
-        else
-          echo "Warning: Configuration file $CONFIG_FILE not found!"
-          echo "Using default configuration..."
+        echo "Using config file: $CONFIG_FILE"
+        
+        if [ ! -f "$CONFIG_FILE" ]; then
+          echo "ERROR: Config file '$CONFIG_FILE' not found!"
+          echo "Available config files:"
+          find . -maxdepth 2 -name "*.config" -type f | head -10
+          exit 1
         fi
         
-        cd openwrt && make defconfig
-        
+        cp "$CONFIG_FILE" openwrt/.config
+        cd openwrt
+        make defconfig
+
     - name: Download packages
       working-directory: ./openwrt
+      env:
+        CCACHE_DIR: /ccache
+        FORCE_UNSAFE_CONFIGURE: 1
       run: |
-        make download -j$(( $(nproc) + 1 ))
-        # 移除不完整的下载文件以节省空间
-        find dl -size -1024c -delete 2>/dev/null || true
+        echo "=== Before download ==="
+        df -h /
+        
+        # 并行下载
+        make download -j$(nproc)
+        
+        # 清理不完整的下载
+        find dl -name "*.tmp" -size -10k -delete 2>/dev/null || true
+        
+        echo "=== After download ==="
+        df -h /
 
     - name: Build firmware
       working-directory: ./openwrt
+      env:
+        CCACHE_DIR: /ccache
+        FORCE_UNSAFE_CONFIGURE: 1
       run: |
-        echo "Building with $(nproc) threads"
-        # 使用CCache加速编译
-        export CCACHE_DIR="$(pwd)/.ccache"
-        ccache -M 5G
+        echo "Starting build with $(nproc) threads"
+        echo "=== Available space before build ==="
+        df -h /
+        
+        # 编译，输出到日志文件
+        time make -j$(nproc) V=s 2>&1 | tee build.log
+        
+        # 显示ccache统计
         ccache -s
-        make -j$(( $(nproc) + 1 )) V=s
+        
+        # 验证构建结果
+        if find bin/targets -type f -name "*.bin" -o -name "*.img" 2>/dev/null | grep -q .; then
+          echo "✅ Build successful!"
+          find bin/targets -type f \( -name "*.bin" -o -name "*.img" -o -name "*.gz" \) | head -5
+        else
+          echo "❌ Build failed - no firmware files found"
+          exit 1
+        fi
 
-    - name: Final cleanup and space report
+    - name: Space optimization during build
+      if: always()
+      working-directory: ./openwrt
       run: |
-        # 最终清理编译缓存
-        rm -rf /tmp/*
-        # 报告最终磁盘使用情况
-        echo "=== Final Disk Space Usage ==="
+        # 在构建后清理临时文件
+        echo "Cleaning build temporary files..."
+        
+        # 保留必要的构建目录，但清理临时文件
+        find . -name "*.o" -type f -delete 2>/dev/null || true
+        find . -name "*.tmp" -type f -delete 2>/dev/null || true
+        find . -name "temp" -type d -exec rm -rf {} + 2>/dev/null || true
+        
+        # 如果构建成功，可以删除下载的源码包
+        if [ -d "bin/targets" ]; then
+          echo "Build succeeded, cleaning downloads..."
+          rm -rf dl/* 2>/dev/null || true
+        fi
+        
+        echo "=== Final space usage ==="
         df -h /
 
-    - name: Upload artifact
+    - name: Upload artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: OpenWrt_${{ github.event.inputs.config_filename }}_${{ github.run_id }}
-        path: openwrt/bin
+        name: firmware-${{ github.event.inputs.config_filename }}-${{ github.run_number }}
+        path: |
+          openwrt/bin
+          openwrt/build.log
+        retention-days: 7
+        compression-level: 0  # 不压缩以节省时间
+
+    - name: Upload ccache cache
+      if: success()
+      uses: actions/upload-artifact@v4
+      with:
+        name: ccache-cache-${{ github.run_number }}
+        path: /ccache
+        retention-days: 7
